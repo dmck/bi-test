@@ -88,7 +88,6 @@ def exit_cars(q, end):
     # get all cars from the database with no exit time
     cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
     rows = cursor.fetchall()
-
     for row in rows:
         car = Car(plate=row.plate, entry_time=row.entry_time.strftime('%Y-%m-%d %H:%M:%S'), exit_time=row.exit_time)
         cars.append(car)
@@ -110,7 +109,7 @@ def exit_cars(q, end):
             # type is either entry or exit
             q.put([car.plate, 'exit', car.exit_time])
 
-            time.sleep(random.randint(5, 10))
+            time.sleep(random.randint(3, 7))
         else:
             cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
             rows = cursor.fetchall()
@@ -118,7 +117,7 @@ def exit_cars(q, end):
                 car = Car(plate=row.plate, entry_time=row.entry_time.strftime('%Y-%m-%d %H:%M:%S'), exit_time=row.exit_time)
                 cars.append(car)
 
-            time.sleep(random.randint(5, 10))
+            time.sleep(random.randint(3, 7))
     # close the connection
     conn.close()
 
@@ -126,13 +125,18 @@ def push_data(q, end):
     print('Pushing data to PowerBI')
     REST_API_URL = pbiurl
 
+    cars_in_garage = pd.DataFrame(columns=['plate'])
+
     # get the current cars in the garage
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM dbo.ParkingGarage WHERE exit_time IS NULL")
+    cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
+    for row in cursor:
+        cars_in_garage = cars_in_garage._append({'plate': row[0]}, ignore_index=True)
 
-    # make a df from the rows and plates
-    cars_in_garage = pd.DataFrame(cursor.fetchall(), columns=['plate'])
+    conn.close()
+
+    print(f'Cars in garage: {len(cars_in_garage)}')
 
     while not end.is_set():
         # get all events from the queue
@@ -151,7 +155,12 @@ def push_data(q, end):
         # print the number of cars in the garage
         print(f'Cars in garage: {len(cars_in_garage)}')
 
-        time.sleep(15)
+        # send number_of_cars to PowerBI, along with the current timestamp
+        data = {'number_of_cars': len(cars_in_garage), 'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        response = requests.post(REST_API_URL, json=data)
+        print(response.status_code)
+
+        time.sleep(2)
 
 
 if __name__ == '__main__':
