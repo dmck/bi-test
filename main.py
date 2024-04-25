@@ -6,13 +6,14 @@ import datetime
 import time
 import multiprocessing
 import requests
+import math
 from config import server, database, username, password, pbiurl
 
 # columns in the parking-garage table
 # columns = ['plate', 'entry_time', 'exit_time']
 
 # global variable to keep track of the garage being open
-garage_open = True
+garage_capacity = 145
 
 # create car class
 class Car(pydantic.BaseModel):
@@ -50,12 +51,10 @@ def exit_car_from_database(car, conn, cursor):
     except Exception as e:
         print(f'Error exiting car: {e}')
 
-def create_cars(q, end):
-    # create a connection to the database
-    conn = create_connection()
-    cursor = conn.cursor()
-
-    for i in range(10):
+def create_cars(q, end, line_of_cars, run_time=600):
+    time_remaining = True
+    start_time = datetime.datetime.now()
+    while time_remaining:
         # create a random car plate 6 characters long
         plate = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890', k=6))
         entry_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -64,20 +63,54 @@ def create_cars(q, end):
         # create a car object, make the times strings
         car = Car(plate=plate, entry_time=entry_time, exit_time=exit_time)
 
-        # add the car to the database
-        add_car_to_database(car, conn, cursor)
+        # add the car to the line of cars
+        line_of_cars.append(car)
 
-        # add the event to the queue
-        # with plate, type, and timestamp
-        # type is either entry or exit
-        q.put([plate, 'entry', entry_time])
+        # sleep for a normal distribution of time about 5 seconds give or take 2 seconds
+        # it takes this long for new cars to show up
+        time.sleep(math.fabs(random.normalvariate(5, 5)))
 
-        # sleep for a random amount of time about 5 seconds give or take 2
-        time.sleep(random.randint(3, 7))
+        # determine if the time has run out
+        # if (datetime.datetime.now() - start_time).seconds > run_time:
+        #    time_remaining = False
+
+        # set time remaining to false if is 5pm or later
+        if datetime.datetime.now().hour >= 17:
+            time_remaining = False
+
+    end.set()
+
+
+def enter_cars(q, end, line_of_cars):
+    # create a connection to the database
+    conn = create_connection()
+    cursor = conn.cursor()
+
+    # get the number of cars in the garage
+    cursor.execute("SELECT COUNT(*) FROM dbo.ParkingGarage WHERE exit_time IS NULL")
+    count = cursor.fetchone()[0]
+    number_of_open_spots = garage_capacity - count
+
+    # let a car in every 5 seconds
+    while not end.is_set():
+        if len(line_of_cars) > 0 and number_of_open_spots > 0:
+            # get the car from the line of cars
+            car = line_of_cars.pop(0)
+            # add the car to the database
+            add_car_to_database(car, conn, cursor)
+
+            # add the event to the queue
+            # with plate, type, and timestamp
+            # type is either entry or exit
+            q.put([car.plate, 'entry', car.entry_time])
+
+            # decrement the number of open spots
+            number_of_open_spots -= 1
+
+            time.sleep(5)
 
     # close the connection
     conn.close()
-    end.set()
 
 def exit_cars(q, end):
     # create a connection to the database
@@ -109,7 +142,7 @@ def exit_cars(q, end):
             # type is either entry or exit
             q.put([car.plate, 'exit', car.exit_time])
 
-            time.sleep(random.randint(3, 7))
+            time.sleep(math.fabs(random.normalvariate(15, 12)))
         else:
             cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
             rows = cursor.fetchall()
@@ -117,26 +150,23 @@ def exit_cars(q, end):
                 car = Car(plate=row.plate, entry_time=row.entry_time.strftime('%Y-%m-%d %H:%M:%S'), exit_time=row.exit_time)
                 cars.append(car)
 
-            time.sleep(random.randint(3, 7))
+            time.sleep(5)
     # close the connection
     conn.close()
 
-def push_data(q, end):
+def push_data(q, end, line_of_cars):
     print('Pushing data to PowerBI')
     REST_API_URL = pbiurl
 
-    cars_in_garage = pd.DataFrame(columns=['plate'])
+    number_of_cars = 0
 
     # get the current cars in the garage
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
-    for row in cursor:
-        cars_in_garage = cars_in_garage._append({'plate': row[0]}, ignore_index=True)
-
+    rows = cursor.fetchall()
+    number_of_cars = len(rows)
     conn.close()
-
-    print(f'Cars in garage: {len(cars_in_garage)}')
 
     while not end.is_set():
         # get all events from the queue
@@ -144,21 +174,25 @@ def push_data(q, end):
         while not q.empty():
             events.append(q.get())
 
-        # for all entries in the queue add the plate to the cars_in_garage
+        # update the cars in the garage
         for event in events:
             if event[1] == 'entry':
-                cars_in_garage = cars_in_garage._append({'plate': event[0]}, ignore_index=True)
+                number_of_cars += 1
             elif event[1] == 'exit':
-                cars_in_garage = cars_in_garage[cars_in_garage.plate != event[0]]
-
+                number_of_cars -= 1
 
         # print the number of cars in the garage
-        print(f'Cars in garage: {len(cars_in_garage)}')
+        # print(f'Cars in garage: {len(cars_in_garage)}')
 
         # send number_of_cars to PowerBI, along with the current timestamp
-        data = {'number_of_cars': len(cars_in_garage), 'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        data = {'number_of_cars': number_of_cars,
+                'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'capacity-min': 0,
+                'capacity-max': garage_capacity,
+                'length_of_line': len(line_of_cars)
+                }
         response = requests.post(REST_API_URL, json=data)
-        print(response.status_code)
+        # print(response.status_code)
 
         time.sleep(2)
 
@@ -168,11 +202,18 @@ if __name__ == '__main__':
     # Create a multiprocessing queue for events to push to PowerBI
     q = multiprocessing.Queue()
     end = multiprocessing.Event()
+    line_of_cars = multiprocessing.Manager().list()
 
-    # Create a process to add cars to the database
+    # Create a process to create cars
     # also adds the event to the queue
-    add_cars_process = multiprocessing.Process(target=create_cars, args=(q,end,))
+    add_cars_process = multiprocessing.Process(target=create_cars, args=(q,end,line_of_cars,))
     add_cars_process.start()
+
+    # Create a process to enter cars
+    # also adds the event to the queue
+    enter_cars_process = multiprocessing.Process(target=enter_cars, args=(q,end,line_of_cars,))
+    enter_cars_process.start()
+
 
     # Create a process to remove cars from the database
     # also adds the event to the queue
@@ -181,11 +222,15 @@ if __name__ == '__main__':
 
     # Create a process to push data to PowerBI
     # pulls events from the queue
-    push_data_process = multiprocessing.Process(target=push_data, args=(q,end,))
+    push_data_process = multiprocessing.Process(target=push_data, args=(q,end,line_of_cars,))
     push_data_process.start()
 
     # Wait for the add cars process to finish
     add_cars_process.join()
+    print('Cars have stopped entering the garage.')
+
+    # Wait for the enter cars process to finish
+    enter_cars_process.join()
     print('Cars have stopped entering the garage.')
 
     # Wait for the exit cars process to finish
