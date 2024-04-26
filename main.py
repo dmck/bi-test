@@ -13,12 +13,20 @@ from config import server, database, username, password, pbiurl
 # columns = ['plate', 'entry_time', 'exit_time']
 
 # global variable to keep track of the garage being open
-garage_capacity = 145
+garage_capacity = 145   # number of cars that can fit in the garage
+gate_speed = 5          # average time it takes for a car to enter the garage
+gate_speed_std_dev = 1  # standard deviation of the time it takes for a car to enter the garage
+arrival_average = 6     # average time between cars arriving
+arrival_std_dev = 5     # standard deviation of the time between cars arriving
+exit_average = 15
+exit_std_dev = 12
+end_time = 10           # 24hr eg 9 = 9am, 17 = 5pm
+pbi_push_interval = 2   # push to PowerBi every # seconds
 
 # create car class
 class Car(pydantic.BaseModel):
     plate: str
-    entry_time: str
+    entry_time: str | None
     exit_time: str | None
 
 # create a connection to the database
@@ -57,7 +65,7 @@ def create_cars(q, end, line_of_cars, run_time=600):
     while time_remaining:
         # create a random car plate 6 characters long
         plate = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890', k=6))
-        entry_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        entry_time = None
         exit_time = None
 
         # create a car object, make the times strings
@@ -68,14 +76,14 @@ def create_cars(q, end, line_of_cars, run_time=600):
 
         # sleep for a normal distribution of time about 5 seconds give or take 2 seconds
         # it takes this long for new cars to show up
-        time.sleep(math.fabs(random.normalvariate(5, 5)))
+        time.sleep(math.fabs(random.normalvariate(arrival_average, arrival_std_dev)))
 
         # determine if the time has run out
         # if (datetime.datetime.now() - start_time).seconds > run_time:
         #    time_remaining = False
 
         # set time remaining to false if is 5pm or later
-        if datetime.datetime.now().hour >= 17:
+        if datetime.datetime.now().hour >= end_time:
             time_remaining = False
 
     end.set()
@@ -93,21 +101,34 @@ def enter_cars(q, end, line_of_cars):
 
     # let a car in every 5 seconds
     while not end.is_set():
-        if len(line_of_cars) > 0 and number_of_open_spots > 0:
-            # get the car from the line of cars
-            car = line_of_cars.pop(0)
-            # add the car to the database
-            add_car_to_database(car, conn, cursor)
+        if len(line_of_cars) > 0:
+            if number_of_open_spots > 0:
+                # get the car from the line of cars
+                car = line_of_cars.pop(0)
+                # add the car to the database
+                car.entry_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                add_car_to_database(car, conn, cursor)
 
-            # add the event to the queue
-            # with plate, type, and timestamp
-            # type is either entry or exit
-            q.put([car.plate, 'entry', car.entry_time])
+                # add the event to the queue
+                # with plate, type, and timestamp
+                # type is either entry or exit
+                q.put([car.plate, 'entry', car.entry_time])
 
-            # decrement the number of open spots
-            number_of_open_spots -= 1
+                # decrement the number of open spots
+                number_of_open_spots -= 1
 
-            time.sleep(5)
+                time.sleep(math.fabs(random.normalvariate(gate_speed, gate_speed_std_dev)))
+            else:
+                print('No open spots')
+
+                # sleep for 1 second
+                time.sleep(math.fabs(random.normalvariate(gate_speed, gate_speed_std_dev)))
+
+                # get the number of cars in the garage
+                cursor.execute("SELECT COUNT(*) FROM dbo.ParkingGarage WHERE exit_time IS NULL")
+                count = cursor.fetchone()[0]
+                number_of_open_spots = garage_capacity - count
+
 
     # close the connection
     conn.close()
@@ -142,7 +163,7 @@ def exit_cars(q, end):
             # type is either entry or exit
             q.put([car.plate, 'exit', car.exit_time])
 
-            time.sleep(math.fabs(random.normalvariate(15, 12)))
+            time.sleep(math.fabs(random.normalvariate(exit_average, exit_std_dev)))
         else:
             cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
             rows = cursor.fetchall()
@@ -150,7 +171,7 @@ def exit_cars(q, end):
                 car = Car(plate=row.plate, entry_time=row.entry_time.strftime('%Y-%m-%d %H:%M:%S'), exit_time=row.exit_time)
                 cars.append(car)
 
-            time.sleep(5)
+            time.sleep(1)
     # close the connection
     conn.close()
 
@@ -194,7 +215,7 @@ def push_data(q, end, line_of_cars):
         response = requests.post(REST_API_URL, json=data)
         # print(response.status_code)
 
-        time.sleep(2)
+        time.sleep(pbi_push_interval)
 
 
 if __name__ == '__main__':
