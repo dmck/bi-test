@@ -16,10 +16,10 @@ from config import server, database, username, password, pbiurl
 garage_capacity = 145   # number of cars that can fit in the garage
 gate_speed = 5          # average time it takes for a car to enter the garage
 gate_speed_std_dev = 1  # standard deviation of the time it takes for a car to enter the garage
-arrival_average = 6     # average time between cars arriving
-arrival_std_dev = 5     # standard deviation of the time between cars arriving
-exit_average = 15
-exit_std_dev = 12
+arrival_average = 15     # average time between cars arriving
+arrival_std_dev = 4     # standard deviation of the time between cars arriving
+exit_average = 14
+exit_std_dev = 13
 end_time = 10           # 24hr eg 9 = 9am, 17 = 5pm
 pbi_push_interval = 2   # push to PowerBi every # seconds
 
@@ -31,7 +31,7 @@ class Car(pydantic.BaseModel):
 
 # create a connection to the database
 def create_connection():
-    conn = pyodbc.connect(f'DRIVER=ODBC Driver 18 for SQL Server;SERVER={server};DATABASE={database};UID={username};PWD={password}')
+    conn = pyodbc.connect(f'DRIVER=ODBC Driver 18 for SQL Server;SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;')
     return conn
 
 # add a car to the database
@@ -60,6 +60,8 @@ def exit_car_from_database(car, conn, cursor):
         print(f'Error exiting car: {e}')
 
 def create_cars(q, end, line_of_cars, run_time=600):
+    print('Creating cars')
+
     time_remaining = True
     start_time = datetime.datetime.now()
     while time_remaining:
@@ -70,6 +72,7 @@ def create_cars(q, end, line_of_cars, run_time=600):
 
         # create a car object, make the times strings
         car = Car(plate=plate, entry_time=entry_time, exit_time=exit_time)
+        print(f'Car created: {car}')
 
         # add the car to the line of cars
         line_of_cars.append(car)
@@ -83,15 +86,17 @@ def create_cars(q, end, line_of_cars, run_time=600):
         #    time_remaining = False
 
         # set time remaining to false if is 5pm or later
-        if datetime.datetime.now().hour >= end_time:
-            time_remaining = False
+        # if datetime.datetime.now().hour >= end_time:
+        #     time_remaining = False
 
     end.set()
 
 
 def enter_cars(q, end, line_of_cars):
+    print('Entering cars')
+
     # create a connection to the database
-    conn = create_connection()
+    conn = pyodbc.connect(f'DRIVER=ODBC Driver 18 for SQL Server;SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;')
     cursor = conn.cursor()
 
     # get the number of cars in the garage
@@ -134,8 +139,10 @@ def enter_cars(q, end, line_of_cars):
     conn.close()
 
 def exit_cars(q, end):
+    print('Exiting cars')
+
     # create a connection to the database
-    conn = create_connection()
+    conn = pyodbc.connect(f'DRIVER=ODBC Driver 18 for SQL Server;SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;')
     cursor = conn.cursor()
 
     cars = []
@@ -182,7 +189,8 @@ def push_data(q, end, line_of_cars):
     number_of_cars = 0
 
     # get the current cars in the garage
-    conn = create_connection()
+    # trust the cert
+    conn = pyodbc.connect(f'DRIVER=ODBC Driver 18 for SQL Server;SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;')
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM dbo.ParkingGarage WHERE exit_time IS NULL")
     rows = cursor.fetchall()
@@ -214,6 +222,8 @@ def push_data(q, end, line_of_cars):
                 }
         response = requests.post(REST_API_URL, json=data)
         # print(response.status_code)
+
+        # print(response.status_code, data')
 
         time.sleep(pbi_push_interval)
 
